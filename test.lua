@@ -1,14 +1,15 @@
--- My Monster Hunter Wilds overlay mod with stacking red health effect
+-- My Monster Hunter Wilds overlay mod with layered HP bars
 local enemy_manager = nil
 local current_monster = nil
 local hp = 0
 local max_hp = 1000
 local previous_hp = 0
-local red_hp = 0
-local red_timer = 0
-local red_duration = 1.5
-local shrink_timer = 0 -- Separate timer for shrinking
-local shrink_duration = 0.5 -- How fast red shrinks once it starts
+local red_hp = 0 -- Red bar locks to HP when damage starts
+local no_hit_timer = 0 -- Time since last hit
+local no_hit_duration = 2.0 -- Delay before red shrinks
+local shrink_timer = 0 -- Shrink animation timer
+local shrink_duration = 0.5 -- How fast red shrinks
+local taking_damage = false -- Flag to track damage state
 
 -- Initialize
 local function initialize()
@@ -27,29 +28,31 @@ local function on_frame()
             hp = current_monster:call("getHP") or 0
             max_hp = current_monster:call("getMaxHP") or 1000
             
-            -- Detect damage and stack red HP
+            -- Detect damage
             if hp < previous_hp then
-                local damage = previous_hp - hp
-                red_hp = red_hp + damage
-                if red_hp > max_hp then red_hp = max_hp end
-                red_timer = red_duration -- Reset delay timer
-                shrink_timer = 0 -- Reset shrink timer
+                if not taking_damage then
+                    red_hp = previous_hp -- Lock red to HP when damage starts
+                    taking_damage = true
+                end
+                no_hit_timer = no_hit_duration -- Reset delay on each hit
+                shrink_timer = 0 -- Reset shrink
             end
             previous_hp = hp
         else
             hp, max_hp = 0, 1000
             previous_hp = 0
             red_hp = 0
-            red_timer = 0
+            no_hit_timer = 0
             shrink_timer = 0
+            taking_damage = false
         end
     end
 
     -- Update timers
-    if red_timer > 0 then
-        red_timer = red_timer - 0.016 -- Count down delay
-        if red_timer <= 0 and red_hp > hp then
-            shrink_timer = shrink_duration -- Start shrinking
+    if no_hit_timer > 0 then
+        no_hit_timer = no_hit_timer - 0.016 -- Count down since last hit
+        if no_hit_timer <= 0 and red_hp > hp then
+            shrink_timer = shrink_duration -- Start shrinking after 2s
         end
     end
     if shrink_timer > 0 then
@@ -57,6 +60,7 @@ local function on_frame()
         red_hp = hp + (red_hp - hp) * (shrink_timer / shrink_duration)
         if shrink_timer <= 0 then
             red_hp = hp -- Snap to current HP
+            taking_damage = false -- Reset damage state
         end
     end
 
@@ -65,16 +69,24 @@ local function on_frame()
         bit.bor(ImGuiWindowFlags_NoTitleBar, ImGuiWindowFlags_NoResize, ImGuiWindowFlags_NoMove, ImGuiWindowFlags_NoBackground)
     )
     imgui.set_window_pos(50, 50)
-    imgui.set_window_size(250, 150)
+    imgui.set_window_size(250, 100)
 
-    -- HP Bar with red effect
+    -- HP Bars (layered)
     imgui.text("HP")
+    -- Bottom layer: Dark grey (total missing HP)
+    imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFF404040) -- Dark grey
+    imgui.progress_bar(1.0, 200, 20) -- Full bar as background
+    imgui.pop_style_color()
+    
+    -- Middle layer: Red (damage ghost)
     if red_hp > hp then
-        imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFFFF0000)
+        imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFFFF0000) -- Red
         imgui.progress_bar(red_hp / max_hp, 200, 20)
         imgui.pop_style_color()
     end
-    imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFF00FF00)
+    
+    -- Top layer: Green (current HP)
+    imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFF00FF00) -- Green
     imgui.progress_bar(hp / max_hp, 200, 20, string.format("%.0f/%.0f", hp, max_hp))
     imgui.pop_style_color()
 
