@@ -1,93 +1,184 @@
--- My Monster Hunter Wilds overlay mod with layered HP bars
+-- My Monster Hunter Wilds overlay mod with layered HP bars and adapted enemy detection
 local enemy_manager = nil
 local current_monster = nil
 local hp = 0
 local max_hp = 1000
 local previous_hp = 0
-local red_hp = 0 -- Red bar locks to HP when damage starts
-local no_hit_timer = 0 -- Time since last hit
-local no_hit_duration = 2.0 -- Delay before red shrinks
-local shrink_timer = 0 -- Shrink animation timer
-local shrink_duration = 0.5 -- How fast red shrinks
-local taking_damage = false -- Flag to track damage state
+local red_hp = 0
+local no_hit_timer = 0
+local no_hit_duration = 1.5 -- Reduced to 1.5 seconds to test shorter duration
+local shrink_timer = 0
+local shrink_duration = 0.5 -- Duration to shrink damage bar (seconds)
+local taking_damage = false
+local damage_cooldown = 0 -- Cooldown to prevent rapid retriggering
+local cooldown_duration = 0.5 -- 0.5 seconds cooldown
+local debug_logged = false
+local enemy_contexts = {}
 
--- Initialize
-local function initialize()
-    enemy_manager = sdk.get_managed_singleton("snow.enemy.EnemyManager")
-    if not enemy_manager then
-        log.error("Failed to initialize EnemyManager!")
+-- Utility function adapted from CatLib
+local function ForEach(list, func)
+    if list == nil then return end
+    local get_Count = list.get_Count
+    local get_Item = list.get_Item
+    if not get_Count or not get_Item then return end
+    local len = get_Count:call(list)
+    for i = 0, len - 1, 1 do
+        local item = get_Item:call(list, i)
+        local ret = func(item, i, len)
+        if ret == -1 then break end
     end
+end
+
+-- Initialize with retry and debug
+local function initialize()
+    enemy_manager = sdk.get_managed_singleton("app.EnemyManager")
+    if not enemy_manager and not debug_logged then
+        log.info("Trying to initialize app.EnemyManager...")
+        debug_logged = true
+    elseif enemy_manager then
+        log.info("Successfully initialized app.EnemyManager")
+    end
+end
+
+-- Update enemy contexts (adapted from _M.OnQuestPlaying)
+local function update_enemy_contexts()
+    local mission_manager = sdk.get_managed_singleton("app.MissionManager")
+    if mission_manager then
+        local browsers = mission_manager:call("getAcceptQuestTargetBrowsers")
+        if browsers then
+            enemy_contexts = {}
+            ForEach(browsers, function(browser)
+                local ctx = browser:call("get_EmContext")
+                if ctx then
+                    table.insert(enemy_contexts, ctx)
+                end
+            end)
+        else
+            enemy_contexts = {}
+        end
+    else
+        enemy_contexts = {}
+    end
+end
+
+-- Get HP from an enemy context (adapted from _M.doUpdateEnemyCtx)
+local function get_enemy_hp(ctx)
+    if not ctx then return 0, 1000 end
+    local parts = sdk.find_type_definition("app.cEnemyContext"):get_field("Parts"):get_data(ctx)
+    if parts then
+        local damage_parts = sdk.find_type_definition("app.cEmModuleParts"):get_field("_DmgParts"):get_data(parts)
+        if damage_parts then
+            local get_Value = sdk.find_type_definition("app.cValueHolderF_R"):get_method("get_Value()")
+            local get_DefaultValue = sdk.find_type_definition("app.cValueHolderF_R"):get_method("get_DefaultValue()")
+            ForEach(damage_parts, function(part)
+                if part then
+                    local hp_value = get_Value:call(part) or 0
+                    local max_hp_value = get_DefaultValue:call(part) or 1000
+                    if hp_value > 0 then
+                        hp = hp_value
+                        max_hp = max_hp_value
+                        return -1 -- Break on first valid part
+                    end
+                end
+            end)
+        end
+    end
+    return hp, max_hp
 end
 
 -- Update and draw every frame
 local function on_frame()
-    -- Fetch monster data
-    if enemy_manager then
-        current_monster = enemy_manager:call("getBossEnemy")
-        if current_monster then
-            hp = current_monster:call("getHP") or 0
-            max_hp = current_monster:call("getMaxHP") or 1000
-            
-            -- Detect damage
-            if hp < previous_hp then
-                if not taking_damage then
-                    red_hp = previous_hp -- Lock red to HP when damage starts
-                    taking_damage = true
-                end
-                no_hit_timer = no_hit_duration -- Reset delay on each hit
-                shrink_timer = 0 -- Reset shrink
+    if not enemy_manager then
+        initialize()
+        if not enemy_manager then
+            enemy_manager = sdk.get_managed_singleton("app.EnemyManager")
+            if not enemy_manager then
+                imgui.begin_window("Monster Stats", true, 1025) -- NoTitleBar + NoBackground
+                imgui.text("Waiting for app.EnemyManager...")
+                imgui.end_window()
+                return
             end
-            previous_hp = hp
-        else
-            hp, max_hp = 0, 1000
-            previous_hp = 0
-            red_hp = 0
-            no_hit_timer = 0
-            shrink_timer = 0
-            taking_damage = false
         end
     end
 
-    -- Update timers
+    update_enemy_contexts()
+    current_monster = nil
+    if #enemy_contexts > 0 then
+        for _, ctx in ipairs(enemy_contexts) do
+            hp, max_hp = get_enemy_hp(ctx)
+            if hp > 0 then
+                current_monster = ctx
+                break
+            end
+        end
+    end
+
+    if current_monster then
+        local hp_floor = math.floor(hp)
+        local prev_hp_floor = math.floor(previous_hp)
+        if hp_floor < prev_hp_floor and math.abs(hp_floor - prev_hp_floor) > 5 and damage_cooldown <= 0 then -- Increased threshold to 5
+            if not taking_damage then
+                red_hp = previous_hp
+                taking_damage = true
+                log.info(string.format("Damage detected: previous_hp=%d, hp=%d, red_hp=%d", prev_hp_floor, hp_floor, math.floor(red_hp)))
+            end
+            no_hit_timer = no_hit_duration
+            shrink_timer = 0
+            damage_cooldown = cooldown_duration
+        end
+        previous_hp = hp
+        if damage_cooldown > 0 then
+            damage_cooldown = damage_cooldown - 0.016
+        end
+        log.info(string.format("Monster HP: %d/%d", hp_floor, math.floor(max_hp)))
+    else
+        hp = 0
+        max_hp = 1000
+        previous_hp = 0
+        red_hp = 0
+        no_hit_timer = 0
+        shrink_timer = 0
+        taking_damage = false
+        damage_cooldown = 0
+        log.info("No boss or enemy detected")
+    end
+
     if no_hit_timer > 0 then
-        no_hit_timer = no_hit_timer - 0.016 -- Count down since last hit
+        no_hit_timer = no_hit_timer - 0.016
         if no_hit_timer <= 0 and red_hp > hp then
-            shrink_timer = shrink_duration -- Start shrinking after 2s
+            shrink_timer = shrink_duration
+            log.info(string.format("Starting shrink: red_hp=%d, hp=%d", math.floor(red_hp), math.floor(hp)))
         end
     end
     if shrink_timer > 0 then
         shrink_timer = shrink_timer - 0.016
         red_hp = hp + (red_hp - hp) * (shrink_timer / shrink_duration)
         if shrink_timer <= 0 then
-            red_hp = hp -- Snap to current HP
-            taking_damage = false -- Reset damage state
+            red_hp = hp
+            taking_damage = false
+            log.info(string.format("Shrink complete: red_hp=%d, hp=%d", math.floor(red_hp), math.floor(hp)))
         end
     end
 
-    -- Draw the overlay
-    imgui.begin_window("Monster Stats", true, 
-        bit.bor(ImGuiWindowFlags_NoTitleBar, ImGuiWindowFlags_NoResize, ImGuiWindowFlags_NoMove, ImGuiWindowFlags_NoBackground)
-    )
-    imgui.set_window_pos(50, 50)
-    imgui.set_window_size(250, 100)
+    -- Set size before beginning window
+    imgui.set_next_window_size(400, 200)
+    imgui.begin_window("Monster Stats", true, 1025) -- NoTitleBar + NoBackground
 
-    -- HP Bars (layered)
+    -- Draw HP bars with layered damage
     imgui.text("HP")
-    -- Bottom layer: Dark grey (total missing HP)
-    imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFF404040) -- Dark grey
-    imgui.progress_bar(1.0, 200, 20) -- Full bar as background
+    local base_y = imgui.get_cursor_pos_y()
+    imgui.push_style_color(1, 0xFF404040) -- Background bar
+    imgui.progress_bar(1.0, 350, 40, "", base_y) -- Full background bar
     imgui.pop_style_color()
     
-    -- Middle layer: Red (damage ghost)
-    if red_hp > hp then
-        imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFFFF0000) -- Red
-        imgui.progress_bar(red_hp / max_hp, 200, 20)
+    if red_hp > hp and taking_damage then
+        imgui.push_style_color(1, 0xFFFF0000) -- Red damage bar
+        imgui.progress_bar(math.min(red_hp / max_hp, 1.0), 350, 40, "", base_y)
         imgui.pop_style_color()
     end
     
-    -- Top layer: Green (current HP)
-    imgui.push_style_color(ImGuiCol_PlotProgressBar, 0xFF00FF00) -- Green
-    imgui.progress_bar(hp / max_hp, 200, 20, string.format("%.0f/%.0f", hp, max_hp))
+    imgui.push_style_color(1, 0xFF00FF00) -- Green current HP bar
+    imgui.progress_bar(math.min(hp / max_hp, 1.0), 350, 40, string.format("%d/%d", math.floor(hp), math.floor(max_hp)), base_y)
     imgui.pop_style_color()
 
     imgui.end_window()
