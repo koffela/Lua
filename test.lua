@@ -1,4 +1,5 @@
 -- My Monster Hunter Wilds overlay mod with layered HP bars and adapted enemy detection
+--[[
 local enemy_manager = nil
 local current_monster = nil
 local hp = 0
@@ -187,3 +188,164 @@ end
 -- Start the mod
 initialize()
 re.on_frame(on_frame)
+--]]
+
+
+
+
+
+-- Monster Hunter Wilds HP Display Mod (Minimal Text Only - Total HP Focus)
+local sdk = sdk
+local re = re
+local imgui = imgui
+local log = log
+
+local enemy_manager = nil
+local current_monster = nil
+local hp = 0
+local max_hp = 1000
+local debug_logged = false
+local enemy_contexts = {}
+
+-- Utility function from your original
+local function ForEach(list, func)
+    if list == nil then return end
+    local get_Count = list.get_Count
+    local get_Item = list.get_Item
+    if not get_Count or not get_Item then return end
+    local len = get_Count:call(list)
+    for i = 0, len - 1 do
+        local item = get_Item:call(list, i)
+        local ret = func(item, i, len)
+        if ret == -1 then break end
+    end
+end
+
+-- Initialize with retry
+local function initialize()
+    enemy_manager = sdk.get_managed_singleton("app.EnemyManager")
+    if not enemy_manager and not debug_logged then
+        log.info("Trying to initialize app.EnemyManager...")
+        debug_logged = true
+    elseif enemy_manager then
+        log.info("Successfully initialized app.EnemyManager")
+    end
+end
+
+-- Update enemy contexts (your working method)
+local function update_enemy_contexts()
+    local mission_manager = sdk.get_managed_singleton("app.MissionManager")
+    if mission_manager then
+        local browsers = mission_manager:call("getAcceptQuestTargetBrowsers")
+        if browsers then
+            enemy_contexts = {}
+            ForEach(browsers, function(browser)
+                local ctx = browser:call("get_EmContext")
+                if ctx then
+                    table.insert(enemy_contexts, ctx)
+                    log.info("Found enemy context: " .. tostring(ctx))
+                end
+            end)
+        else
+            enemy_contexts = {}
+            log.info("No browsers found in MissionManager")
+        end
+    else
+        enemy_contexts = {}
+        log.info("MissionManager not found")
+    end
+    log.info("Enemy contexts count: " .. #enemy_contexts)
+end
+
+-- Get total HP from enemy context
+local function get_enemy_hp(ctx)
+    if not ctx then
+        log.info("No context provided to get_enemy_hp")
+        return 0, 1000
+    end
+
+    -- Try Life field (from previous log)
+    local life = ctx:get_field("Life")
+    if life then
+        local vital = life:get_field("_Vital") -- Check for nested Vital
+        if not vital then
+            vital = life -- Fallback to Life itself
+        end
+
+        local get_Value = sdk.find_type_definition("app.cValueHolderF_R"):get_method("get_Value()")
+        local get_DefaultValue = sdk.find_type_definition("app.cValueHolderF_R"):get_method("get_DefaultValue()")
+        local current_hp = get_Value:call(vital)
+        local maximum_hp = get_DefaultValue:call(vital)
+
+        if current_hp and maximum_hp then
+            log.info(string.format("HP from Life: %f/%f", current_hp, maximum_hp))
+            return current_hp, maximum_hp
+        else
+            log.info("Failed to read HP from Life/_Vital")
+        end
+    else
+        log.info("No Life field in cEnemyContext")
+    end
+
+    -- Debug: Dump all fields to find total HP
+    local type_def = ctx:get_type_definition()
+    local fields = type_def:get_fields()
+    log.info("Dumping cEnemyContext fields for HP search:")
+    for i, field in ipairs(fields) do
+        local name = field:get_name()
+        local data = field:get_data(ctx)
+        log.info(string.format("Field %d: %s = %s", i, name, tostring(data)))
+    end
+
+    return 0, 1000 -- Fallback until we find the right field
+end
+
+-- Update and draw every frame
+local function on_frame()
+    if not enemy_manager then
+        initialize()
+        if not enemy_manager then
+            imgui.begin_window("Monster HP", true, 1025)
+            imgui.text("Waiting for app.EnemyManager...")
+            imgui.end_window()
+            return
+        end
+    end
+
+    update_enemy_contexts()
+    current_monster = nil
+    if #enemy_contexts > 0 then
+        for _, ctx in ipairs(enemy_contexts) do
+            hp, max_hp = get_enemy_hp(ctx)
+            if hp > 0 then
+                current_monster = ctx
+                break
+            end
+        end
+    end
+
+    if not current_monster then
+        hp = 0
+        max_hp = 1000
+        log.info("No valid monster detected")
+    else
+        log.info(string.format("Monster HP: %d/%d", math.floor(hp), math.floor(max_hp)))
+    end
+
+    -- Display HP as text only
+    imgui.set_next_window_size(200, 50)
+    imgui.begin_window("Monster HP", true, 1025)
+    if current_monster then
+        imgui.text(string.format("HP: %d/%d", math.floor(hp), math.floor(max_hp)))
+    else
+        imgui.text("HP: 0/1000")
+    end
+    imgui.end_window()
+end
+
+-- Start the mod
+initialize()
+re.on_frame(on_frame)
+
+
+
